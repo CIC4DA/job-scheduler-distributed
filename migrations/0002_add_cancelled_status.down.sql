@@ -1,0 +1,3 @@
+-- Postgres has no ALTER TYPE ... DROP VALUE — removing an enum value isn't
+-- directly supported. A real rollback would require recreating the type
+-- and remapping any rows using it. Left as a no-op here.

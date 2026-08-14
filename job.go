@@ -30,6 +30,7 @@ const (
 	Running
 	Completed
 	Failed
+	Cancelled
 )
 
 func NewJob(jobType string, payload string) *Job {
@@ -67,6 +68,8 @@ func ParseJobStatus(s string) JobStatus {
 		return Completed
 	case "FAILED":
 		return Failed
+	case "CANCELLED":
+		return Cancelled
 	default:
 		return Queued
 	}
@@ -78,7 +81,7 @@ func submitJobHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Type string `json:"type"`
-			Payload string `json: "payload"`
+			Payload string `json:"payload"`
 		}
 
 		if err := json.NewDecoder (r.Body).Decode(&req); err != nil {
@@ -98,6 +101,21 @@ func submitJobHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+func cancelJobHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request){
+		id := chi.URLParam(r, "id")
+		err := cancelJob(r.Context(), pool, id)
+
+		if err != nil {
+			http.Error(w, "job not found", http.StatusNotFound)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
 func getJobHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request){
 		id := chi.URLParam(r, "id")
@@ -113,6 +131,21 @@ func getJobHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+func listJobHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request){
+		jobs, err := ListJobs(r.Context(), pool)
+
+		if err != nil {
+			http.Error(w, "jobs not found", http.StatusNotFound)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(jobs)
+	}
+}
+
+
 // Methods in Go aren't defined inside the struct like in Java/Python. They're regular functions with an extra "receiver" argument before the name, which attaches the function to a type:
 func (s JobStatus) String() string {
 	switch s {
@@ -124,6 +157,8 @@ func (s JobStatus) String() string {
 		return "COMPLETED"
 	case Failed:
 		return "FAILED"
+	case Cancelled:
+		return "CANCELLED"
 	default:
 		return "UNKNOWN"
 	}
@@ -260,6 +295,37 @@ func CreateJob(ctx context.Context, pool *pgxpool.Pool, job *Job) error {
 	_ , err := pool.Exec(ctx,
 		`INSERT INTO jobs (id, type, payload, status) Values ($1, $2, $3, $4)`,
 		job.Id, job.Type, job.Payload, job.Status.String(),
+	)
+	return err
+}
+
+func ListJobs(ctx context.Context, pool *pgxpool.Pool) ([]*Job, error) {
+	rows, err := pool.Query(ctx, `SELECT id, type, payload, status FROM jobs ORDER BY created_at DESC`)
+
+	if err != nil {
+		return nil, err
+	}
+
+	defer rows.Close()
+
+	var jobs []*Job
+	for rows.Next(){
+		var job Job
+		var status string
+		if err := rows.Scan(&job.Id, &job.Type, &job.Payload, &status); err != nil {
+			return nil, err
+		}
+		job.Status = ParseJobStatus(status)
+		jobs = append(jobs, &job)
+	}
+
+	return jobs,rows.Err()
+}
+
+func cancelJob(ctx context.Context, pool *pgxpool.Pool, id string) error {
+	_, err := pool.Exec(ctx,
+		`UPDATE jobs SET status = 'CANCELLED', updated_at = now() WHERE id = $1`,
+		id,
 	)
 	return err
 }
@@ -436,6 +502,8 @@ func main() {
 	router := chi.NewRouter()
 	router.Post("/jobs", submitJobHandler(pool))
 	router.Get("/jobs/{id}", getJobHandler(pool))
+	router.Get("/jobs", listJobHandler(pool))
+	router.Delete("/jobs/{id}", cancelJobHandler(pool))
 
 	server := &http.Server {Addr : ":8080", Handler: router}
 	go func() {
