@@ -11,6 +11,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"log"
 	"github.com/google/uuid"
+	"encoding/json"
+	"net/http"
+	"github.com/go-chi/chi/v5"
 )
 
 type Job struct {
@@ -35,6 +38,78 @@ func NewJob(jobType string, payload string) *Job {
 		Type : jobType,
 		Payload : payload,
 		Status : Queued,
+	}
+}
+
+func GetJob(ctx context.Context, pool *pgxpool.Pool, id string) (*Job, error) {
+	var job Job
+	var status string
+	err := pool.QueryRow(ctx,
+		`SELECT id, type, payload, status FROM jobs WHERE id = $1`,
+		id,	
+	).Scan(&job.Id, &job.Type, &job.Payload, &status)
+
+	if err != nil {
+		return nil, err
+	}
+
+	job.Status = ParseJobStatus(status)
+	return &job, nil
+}
+
+func ParseJobStatus(s string) JobStatus {
+	switch s {
+	case "QUEUED":
+		return Queued
+	case "RUNNING":
+		return Running
+	case "COMPLETED":
+		return Completed
+	case "FAILED":
+		return Failed
+	default:
+		return Queued
+	}
+}
+
+
+// HTTP HANDLERS
+func submitJobHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Type string `json:"type"`
+			Payload string `json: "payload"`
+		}
+
+		if err := json.NewDecoder (r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		job := NewJob(req.Type, req.Payload)
+		if err := CreateJob(r.Context(), pool, job); err != nil {
+			http.Error(w, "failed to save job", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(job)
+	}
+}
+
+func getJobHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request){
+		id := chi.URLParam(r, "id")
+		job, err := GetJob(r.Context(), pool, id)
+
+		if err != nil {
+			http.Error(w, "job not found", http.StatusNotFound)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(job)
 	}
 }
 
@@ -339,22 +414,33 @@ func main() {
 	// }()
 
 	// Your producer goroutine should now only write to Postgres — it shouldn't know or care about the jobs channel or the executor at all (this is the real architectural shift: submission and execution are now fully independent, exactly like a real HTTP client submitting a job has no idea which worker will eventually run it):
+	// go func() {
+	// 	i := 0
+	// 	for {
+	// 		select {
+	// 		case <- ctx.Done():
+	// 			return
+	// 		default:
+	// 			{
+	// 				job := NewJob("echo", fmt.Sprintf("job #%d", i))
+	// 				if err := CreateJob(ctx, pool ,job); err != nil {
+	// 					fmt.Println("failed to save job: ", err)
+	// 				}
+	// 				i++
+	// 				time.Sleep(300 * time.Millisecond)
+	// 			}
+	// 		}
+	// 	}
+	// }()
+
+	router := chi.NewRouter()
+	router.Post("/jobs", submitJobHandler(pool))
+	router.Get("/jobs/{id}", getJobHandler(pool))
+
+	server := &http.Server {Addr : ":8080", Handler: router}
 	go func() {
-		i := 0
-		for {
-			select {
-			case <- ctx.Done():
-				return
-			default:
-				{
-					job := NewJob("echo", fmt.Sprintf("job #%d", i))
-					if err := CreateJob(ctx, pool ,job); err != nil {
-						fmt.Println("failed to save job: ", err)
-					}
-					i++
-					time.Sleep(300 * time.Millisecond)
-				}
-			}
+		if err:= server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			fmt.Println("Server error: ", err)
 		}
 	}()
 
@@ -388,6 +474,9 @@ func main() {
 	}()
 
 	executor.Run(ctx, jobs)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	server.Shutdown(shutdownCtx)
 	fmt.Println("shut down cleanly")
 
 }
