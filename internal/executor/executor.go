@@ -2,11 +2,11 @@ package executor
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/rs/zerolog"
 	"jobscheduler/internal/models"
 	"jobscheduler/internal/repository"
 )
@@ -16,12 +16,14 @@ type Executor struct {
 	sem 	chan struct {}
 	wg 		sync.WaitGroup
 	running atomic.Int32
+	log		zerolog.Logger
 }
 
-func New(pool *pgxpool.Pool, maxConcurrent int) *Executor {
+func New(pool *pgxpool.Pool, maxConcurrent int, log zerolog.Logger) *Executor {
 	return &Executor{
 		pool: pool,
 		sem: make(chan struct {}, maxConcurrent),
+		log: log,
 	}
 }
 
@@ -54,10 +56,10 @@ func (e *Executor) Run(ctx context.Context, jobs <- chan *models.Job) {
 				}()
 
 				j.Status = models.Running
-				fmt.Println("processing: ", j)
+				e.log.Info().Str("job_id", j.Id).Str("type", j.Type).Msg("processing job")
 				time.Sleep(2 * time.Second)  // stand-in for real work
 				j.Status = models.Completed
-				fmt.Println("done: ", j)
+				e.log.Info().Str("job_id", j.Id).Msg("job completed")
 				
 				// Write completion back to Postgres using a FRESH context,
 				// not the outer ctx — during shutdown, ctx is already
@@ -66,7 +68,7 @@ func (e *Executor) Run(ctx context.Context, jobs <- chan *models.Job) {
 				writeCtx, cancel := context.WithTimeout(context.Background(), 3 * time.Second)
 				defer cancel()
 				if err := repository.MarkCompleted(writeCtx, e.pool, j.Id); err != nil {
-					fmt.Println("failed to mark job completed:", err)
+					e.log.Error().Err(err).Str("job_id", j.Id).Msg("failed to mark job completed")
 				}
 
 			}(job)

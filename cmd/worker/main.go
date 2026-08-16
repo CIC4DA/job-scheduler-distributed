@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"time"
@@ -14,31 +12,40 @@ import (
 	"jobscheduler/internal/broker"
 	"jobscheduler/internal/executor"
 	"jobscheduler/internal/models"
+	"jobscheduler/internal/config"
+	"jobscheduler/internal/logger"
 )
 
 func main() {
+	log := logger.New("worker")
+
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatal().Err(err).Msg("config load failed")
+	}
+
 	dbCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(dbCtx, "postgres://postgres:postgres@localhost:5432/jobscheduler")
+	pool, err := pgxpool.New(dbCtx, cfg.PostgresDSN)
 	if err != nil {
-		log.Fatalf("unable to create connection pool: %v", err)
+		log.Fatal().Err(err).Msg("unable to create connection pool")
 	}
 	defer pool.Close()
 
 	if err := pool.Ping(dbCtx); err != nil {
-		log.Fatalf("unable to reach database: %v", err)
+		log.Fatal().Err(err).Msg("unable to reach database")
 	}
-	fmt.Println("worker: connected to database")
+	log.Info().Msg("connected to database")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	consumer := broker.NewConsumer([]string{"localhost:9092"}, broker.TopicJobs, "workers")
+	consumer := broker.NewConsumer(cfg.KafkaBrokers, broker.TopicJobs, "workers")
 	defer consumer.Close()
 
 	jobs := make(chan *models.Job)
-	exec := executor.New(pool, 3)
+	exec := executor.New(pool, 3, log)
 
 	// This goroutine is the bridge: Kafka message in, *models.Job out on a
 	// plain Go channel. Executor.Run has no idea Kafka exists — it just
@@ -48,13 +55,13 @@ func main() {
 		for {
 			msg, err := consumer.FetchMessage(ctx)
 			if err != nil {
-				fmt.Println("worker: consumer stopped:", err)
+				log.Error().Err(err).Msg("consumer stopped")
 				return
 			}
 
 			var job models.Job
 			if err := json.Unmarshal(msg.Value, &job); err != nil {
-				fmt.Println("worker: bad job message:", err)
+				log.Error().Err(err).Msg("bad job message")
 				consumer.Commit(ctx, msg)
 				continue
 			}
@@ -66,11 +73,11 @@ func main() {
 			}
 
 			if err := consumer.Commit(ctx, msg); err != nil {
-				fmt.Println("worker: commit failed:", err)
+				log.Error().Err(err).Str("job_id", job.Id).Msg("commit failed")
 			}
 		}
 	}()
 
 	exec.Run(ctx, jobs)
-	fmt.Println("worker: shut down cleanly")
+	log.Info().Msg("worker shut down cleanly")
 }

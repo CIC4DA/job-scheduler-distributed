@@ -2,10 +2,10 @@ package scheduler
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/rs/zerolog"
 
 	"jobscheduler/internal/models"
 	"jobscheduler/internal/repository"
@@ -22,12 +22,13 @@ type Publisher interface {
 type Dispatcher struct {
 	pool 		*pgxpool.Pool
 	publisher 	Publisher
+	log 		zerolog.Logger
 	interval 	time.Duration
 	batchSize 	int
 }
 
-func NewDispatcher(pool *pgxpool.Pool, publisher Publisher, interval time.Duration, batchSize int) *Dispatcher {
-	return &Dispatcher{pool: pool, publisher: publisher, interval: interval, batchSize: batchSize}
+func NewDispatcher(pool *pgxpool.Pool, publisher Publisher, log zerolog.Logger, interval time.Duration, batchSize int) *Dispatcher {
+	return &Dispatcher{pool: pool, publisher: publisher, log: log, interval: interval, batchSize: batchSize}
 }
 
 func (d *Dispatcher) Run(ctx context.Context) {
@@ -44,7 +45,7 @@ func (d *Dispatcher) Run(ctx context.Context) {
 		case <-ticker.C:
 			pending, err := repository.FetchPending(ctx, d.pool, d.batchSize)
 			if err != nil {
-				fmt.Println("failed to fetch pending jobs:", err)
+				d.log.Error().Err(err).Msg("failed to fetch pending jobs")
 				continue
 			}
 			// for _, job := range pending {
@@ -64,7 +65,7 @@ func (d *Dispatcher) Run(ctx context.Context) {
 			//The dispatcher's job ends the moment it hands the message to Kafka — it no longer owns delivery to a worker.
 			for _, job := range pending {
 				if err := d.publisher.PublishJob(ctx, job); err != nil {
-					fmt.Println("failed to publish job: ", err)
+					d.log.Error().Err(err).Str("job_id", job.Id).Msg("failed to publish job")
 				}
 			}
 
