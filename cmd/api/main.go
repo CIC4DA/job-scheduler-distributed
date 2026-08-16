@@ -12,9 +12,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"jobscheduler/internal/api"
-	"jobscheduler/internal/executor"
-	"jobscheduler/internal/models"
-	"jobscheduler/internal/scheduler"
 )
 
 func main() {
@@ -30,14 +27,10 @@ func main() {
 	if err := pool.Ping(dbCtx); err != nil {
 		log.Fatalf("unable to reach database: %v", err)
 	}
-	fmt.Println("connected to database")
+	fmt.Println("api: connected to database")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-
-	jobs := make(chan *models.Job)
-	exec := executor.New(pool, 3)
-	dispatcher := scheduler.NewDispatcher(pool, 1*time.Second, 5)
 
 	server := &http.Server{Addr: ":8080", Handler: api.NewRouter(pool)}
 	go func() {
@@ -46,12 +39,10 @@ func main() {
 		}
 	}()
 
-	go dispatcher.Run(ctx, jobs)
-
-	exec.Run(ctx, jobs)
+	<-ctx.Done()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 	server.Shutdown(shutdownCtx)
-	fmt.Println("shut down cleanly")
+	fmt.Println("api: shut down cleanly")
 }

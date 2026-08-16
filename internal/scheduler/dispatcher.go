@@ -11,17 +11,26 @@ import (
 	"jobscheduler/internal/repository"
 )
 
+// Publisher is an interface, not a concrete type — Dispatcher doesn't need to
+// know it's Kafka underneath. Anything with a PublishJob method satisfies this
+// (broker.JobPublisher does). This is how Go does dependency injection: no
+// framework, just "accept the smallest interface that does what I need."
+type Publisher interface {
+	PublishJob(ctx context.Context, job *models.Job) error
+}
+
 type Dispatcher struct {
 	pool 		*pgxpool.Pool
+	publisher 	Publisher
 	interval 	time.Duration
 	batchSize 	int
 }
 
-func NewDispatcher(pool *pgxpool.Pool, interval time.Duration, batchSize int) *Dispatcher {
-	return &Dispatcher{pool: pool, interval: interval, batchSize: batchSize}
+func NewDispatcher(pool *pgxpool.Pool, publisher Publisher, interval time.Duration, batchSize int) *Dispatcher {
+	return &Dispatcher{pool: pool, publisher: publisher, interval: interval, batchSize: batchSize}
 }
 
-func (d *Dispatcher) Run(ctx context.Context, jobs chan<- *models.Job) {
+func (d *Dispatcher) Run(ctx context.Context) {
 	// Ticker fires once every d.interval (1s, as wired in main), forever,
 	// until we stop it. ticker.C is a channel that receives a value each tick.
 	ticker := time.NewTicker(d.interval)
@@ -29,7 +38,7 @@ func (d *Dispatcher) Run(ctx context.Context, jobs chan<- *models.Job) {
 	for {
 		select {
 		case <-ctx.Done():
-			close(jobs)
+			// close(jobs)
 			return
 		// Once per tick: go ask Postgres for a fresh batch of claimable jobs.
 		case <-ticker.C:
@@ -38,18 +47,27 @@ func (d *Dispatcher) Run(ctx context.Context, jobs chan<- *models.Job) {
 				fmt.Println("failed to fetch pending jobs:", err)
 				continue
 			}
+			// for _, job := range pending {
+			// 	select {
+			// 	case <-ctx.Done():
+			// 		close(jobs)
+			// 		return
+			// 	// The actual handoff to the Executor. This blocks if the Executor's semaphore is currently full
+			// 	// full semaphore blocks the Executor's receive loop, which blocks this send
+			// 	// which pauses this whole dispatch loop from moving
+			// 	// on to the next job or the next tick.
+			// 	case jobs <- job:
+				// delivery to worker
+			// 	}
+			// }
+
+			//The dispatcher's job ends the moment it hands the message to Kafka — it no longer owns delivery to a worker.
 			for _, job := range pending {
-				select {
-				case <-ctx.Done():
-					close(jobs)
-					return
-				// The actual handoff to the Executor. This blocks if the Executor's semaphore is currently full
-				// full semaphore blocks the Executor's receive loop, which blocks this send
-				// which pauses this whole dispatch loop from moving
-				// on to the next job or the next tick.
-				case jobs <- job:
+				if err := d.publisher.PublishJob(ctx, job); err != nil {
+					fmt.Println("failed to publish job: ", err)
 				}
 			}
+
 		}
 	}
 }
