@@ -65,7 +65,10 @@ func (d *Dispatcher) Run(ctx context.Context) {
 			//The dispatcher's job ends the moment it hands the message to Kafka — it no longer owns delivery to a worker.
 			for _, job := range pending {
 				if err := d.publisher.PublishJob(ctx, job); err != nil {
-					d.log.Error().Err(err).Str("job_id", job.Id).Msg("failed to publish job")
+					d.log.Error().Err(err).Str("job_id", job.Id).Msg("failed to publish job, rolling back")
+					if rbErr := repository.RollbackToQueued(ctx, d.pool, job.Id); rbErr != nil {
+						d.log.Error().Err(rbErr).Str("job_id", job.Id).Msg("rollback also failed")
+					}
 				}
 			}
 

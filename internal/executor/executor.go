@@ -13,15 +13,17 @@ import (
 
 type Executor struct {
 	pool 	*pgxpool.Pool
+	workerID string
 	sem 	chan struct {}
 	wg 		sync.WaitGroup
 	running atomic.Int32
 	log		zerolog.Logger
 }
 
-func New(pool *pgxpool.Pool, maxConcurrent int, log zerolog.Logger) *Executor {
+func New(pool *pgxpool.Pool, workerID string, maxConcurrent int, log zerolog.Logger) *Executor {
 	return &Executor{
 		pool: pool,
+		workerID: workerID,
 		sem: make(chan struct {}, maxConcurrent),
 		log: log,
 	}
@@ -57,6 +59,10 @@ func (e *Executor) Run(ctx context.Context, jobs <- chan *models.Job) {
 
 				j.Status = models.Running
 				e.log.Info().Str("job_id", j.Id).Str("type", j.Type).Msg("processing job")
+				if err := repository.AssignWorker(context.Background(), e.pool, j.Id, e.workerID); err != nil {
+					e.log.Error().Err(err).Str("job_id", j.Id).Msg("Failed to record worker assignment")
+				}
+
 				time.Sleep(2 * time.Second)  // stand-in for real work
 				j.Status = models.Completed
 				e.log.Info().Str("job_id", j.Id).Msg("job completed")
@@ -74,4 +80,8 @@ func (e *Executor) Run(ctx context.Context, jobs <- chan *models.Job) {
 			}(job)
 		}
 	}
+}
+
+func (e *Executor) RunningJobs() int32 {
+	return e.running.Load()
 }

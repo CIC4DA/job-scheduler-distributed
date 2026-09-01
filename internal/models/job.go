@@ -7,6 +7,7 @@ type Job struct {
 	Type string
 	Payload string
 	Status JobStatus
+	WorkerId *string //pointer, since most jobs won't have one until claimed, and it should clear back to nil/NULL when requeued
 }
 
 type JobStatus int

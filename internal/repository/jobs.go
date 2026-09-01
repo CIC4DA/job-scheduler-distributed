@@ -2,8 +2,10 @@ package repository
 
 import (
 	"context"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"jobscheduler/internal/models"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func CreateJob(ctx context.Context, pool *pgxpool.Pool, job *models.Job) error {
@@ -18,9 +20,9 @@ func GetJob(ctx context.Context, pool *pgxpool.Pool, id string) (*models.Job, er
 	var job models.Job
 	var status string
 	err := pool.QueryRow(ctx,
-		`SELECT id, type, payload, status FROM jobs WHERE id = $1`,
+		`SELECT id, type, payload, status, worker_id FROM jobs WHERE id = $1`,
 		id,
-	).Scan(&job.Id, &job.Type, &job.Payload, &status)
+	).Scan(&job.Id, &job.Type, &job.Payload, &status, &job.WorkerId)
 
 	if err != nil {
 		return nil, err
@@ -30,9 +32,9 @@ func GetJob(ctx context.Context, pool *pgxpool.Pool, id string) (*models.Job, er
 	return &job, nil
 }
 
-func ListJobs (ctx context.Context, pool *pgxpool.Pool) ([]*models.Job, error){
-	rows, err := pool.Query(ctx, 
-		`SELECT id, type, payload, status FROM jobs ORDER BY created_at DESC`,
+func ListJobs(ctx context.Context, pool *pgxpool.Pool) ([]*models.Job, error) {
+	rows, err := pool.Query(ctx,
+		`SELECT id, type, payload, status, worker_id FROM jobs ORDER BY created_at DESC`,
 	)
 
 	if err != nil {
@@ -44,7 +46,7 @@ func ListJobs (ctx context.Context, pool *pgxpool.Pool) ([]*models.Job, error){
 	for rows.Next() {
 		var job models.Job
 		var status string
-		if err := rows.Scan(&job.Id, &job.Type, &job.Payload, &status); err != nil {
+		if err := rows.Scan(&job.Id, &job.Type, &job.Payload, &status, &job.WorkerId); err != nil {
 			return nil, err
 		}
 		job.Status = models.ParseJobStatus(status)
@@ -91,14 +93,42 @@ func FetchPending(ctx context.Context, pool *pgxpool.Pool, limit int) ([]*models
 		job.Status = models.Running
 		jobs = append(jobs, &job)
 	}
-	return jobs, rows.Err()		
+	return jobs, rows.Err()
 }
-
 
 func MarkCompleted(ctx context.Context, pool *pgxpool.Pool, jobID string) error {
 	_, err := pool.Exec(ctx,
 		`UPDATE jobs SET status = 'COMPLETED', updated_at = now() WHERE id = $1`,
 		jobID,
 	)
+	return err
+}
+
+func RollbackToQueued(ctx context.Context, pool *pgxpool.Pool, jobID string) error {
+	_, err := pool.Exec(ctx,
+		`UPDATE jobs SET status = 'QUEUED', updated_at = now() WHERE id = $1`,
+		jobID,
+	)
+	return err
+}
+
+func AssignWorker(ctx context.Context, pool *pgxpool.Pool, jobID string, workerID string) error {
+	_, err := pool.Exec(ctx,
+		`UPDATE jobs SET worker_id = $1, updated_at = now() WHERE id = $2`,
+		workerID, jobID,
+	)
+	return err
+}
+
+func RequeueStale(ctx context.Context, pool *pgxpool.Pool, maxRunTime time.Duration) error {
+	_, err := pool.Exec(ctx, `
+		UPDATE jobs
+		SET status = 'QUEUED', worker_id = NULL, updated_at = now()
+		WHERE status = 'RUNNING'
+		AND (
+			worker_id IN (SELECT id FROM workers WHERE status = 'UNHEALTHY')
+			OR updated_at < now() - $1::interval
+		)
+	`, maxRunTime.String())
 	return err
 }

@@ -9,9 +9,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"jobscheduler/internal/broker"
-	"jobscheduler/internal/scheduler"
 	"jobscheduler/internal/config"
 	"jobscheduler/internal/logger"
+	"jobscheduler/internal/scheduler"
 )
 
 func main() {
@@ -44,6 +44,9 @@ func main() {
 	defer stop()
 
 	dispatcher := scheduler.NewDispatcher(pool, publisher, log, 1*time.Second, 5)
+	monitor := scheduler.NewMonitor(pool, log, 10*time.Second, 15*time.Second, 30*time.Second)
+	go monitor.Run(ctx)
+
 	dispatcher.Run(ctx)
 
 	log.Info().Msg("scheduler shut down cleanly")
